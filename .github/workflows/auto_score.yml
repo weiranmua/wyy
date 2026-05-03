@@ -17,12 +17,11 @@ jobs:
       with:
         python-version: '3.11'
     
-    # 安装依赖 + 强制国内镜像 + 不走git，彻底解决pyncm报错
+    # 关键：只安装真正需要的包，不装 pyncm
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install requests pycryptodome PyNaCl -i https://pypi.tuna.tsinghua.edu.cn/simple
-        pip install https://github.com/mos9527/pyncm/archive/refs/heads/master.zip --trusted-host github.com
     
     - name: Run script
       env:
