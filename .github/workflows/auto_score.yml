@@ -2,7 +2,7 @@ name: Auto Score
 
 on:
   schedule:
-    - cron: '0 17 * * *'  # UTC 17:00 (北京时间1:00)
+    - cron: '0 17 * * *'
   workflow_dispatch:
 
 jobs:
@@ -10,21 +10,19 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     
     - name: Set up Python
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.x'
+        python-version: '3.11'
     
-    - name: Set up Git credentials
-  run: |
-    git config --global url."https://github.com/".insteadOf "https://github.com/"
-    git config --global http.sslVerify false # 解决SSL/网络异常
-- name: Install dependencies
-  run: |
-    python -m pip install --upgrade pip
-    pip install -r requirements.txt
+    # 安装依赖 + 强制国内镜像 + 不走git，彻底解决pyncm报错
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests pycryptodome PyNaCl -i https://pypi.tuna.tsinghua.edu.cn/simple
+        pip install https://github.com/mos9527/pyncm/archive/refs/heads/master.zip --trusted-host github.com
     
     - name: Run script
       env:
@@ -38,4 +36,4 @@ jobs:
         WAIT_TIME_MAX: ${{ secrets.WAIT_TIME_MAX }}
         SCORE: ${{ secrets.SCORE }}
         FULL_EXTRA_TASKS: ${{ secrets.FULL_EXTRA_TASKS }}
-      run: python main.py 
+      run: python main.py
