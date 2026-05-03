@@ -2,26 +2,26 @@ name: Refresh Cookie
 
 on:
   schedule:
-    - cron: '0 14 * * 0'  # 每周日UTC 14:00 (北京时间22:00)
+    - cron: '0 14 * * 0'  # 每周日 22:00 北京时间
   workflow_dispatch:
 
 jobs:
   refresh:
     runs-on: ubuntu-latest
-  
+    
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     
     - name: Set up Python
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.x'
+        python-version: '3.11'
     
+    # 关键：只装必需依赖，不装 pyncm
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install requests pycryptodome PyNaCl -i https://pypi.tuna.tsinghua.edu.cn/simple
     
     - name: Run refresh script
       env:
