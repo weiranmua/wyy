@@ -10,8 +10,6 @@ from email.mime.text import MIMEText
 from Crypto.Cipher import AES, PKCS1_v1_5
 from Crypto.PublicKey import RSA
 from Crypto.Util.Padding import pad
-import nacl.encoding
-import nacl.public
 
 # ----------------------------------------------------------------------
 # 日志配置
@@ -140,48 +138,18 @@ def refresh_token(session: NeteaseSession, music_u: str, csrf: str) -> dict:
 
 
 # ----------------------------------------------------------------------
-# GitHub Secrets 更新
+# 使用gh命令更新Secret（删除nacl加密，改用gh cli）
 # ----------------------------------------------------------------------
-def get_public_key(repo: str, gh_token: str):
-    url = f"https://api.github.com/repos/{repo}/actions/secrets/public-key"
-    headers = {
-        "Authorization": f"token {gh_token}",
-        "Accept": "application/vnd.github.v3+json",
-    }
-    resp = requests.get(url, headers=headers)
-    resp.raise_for_status()
-    data = resp.json()
-    return data["key_id"], data["key"]
-
-
-def encrypt_secret(public_key: str, value: str) -> str:
-    pk = nacl.public.PublicKey(
-        public_key.encode("utf-8"), nacl.encoding.Base64Encoder()
-    )
-    sealed_box = nacl.public.SealedBox(pk)
-    encrypted = sealed_box.encrypt(value.encode("utf-8"))
-    return base64.b64encode(encrypted).decode("utf-8")
-
-
-def update_secret(repo: str, secret_name: str, secret_value: str, gh_token: str):
-    key_id, public_key = get_public_key(repo, gh_token)
-    encrypted = encrypt_secret(public_key, secret_value)
-
-    url = f"https://api.github.com/repos/{repo}/actions/secrets/{secret_name}"
-    headers = {
-        "Authorization": f"token {gh_token}",
-        "Accept": "application/vnd.github.v3+json",
-    }
-    payload = {
-        "encrypted_value": encrypted,
-        "key_id": key_id,
-    }
-    resp = requests.put(url, headers=headers, json=payload)
-    if resp.status_code in (201, 204):
-        log.info("Secret %s 更新成功", secret_name)
+def update_secret_gh(secret_name: str, secret_value: str):
+    """调用gh命令行更新secret，自动处理加密，无需代码加密"""
+    import subprocess
+    cmd = ["gh", "secret", "set", secret_name, "--body", secret_value]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode == 0:
+        log.info(f"Secret {secret_name} 更新成功")
     else:
-        log.error("更新 Secret %s 失败: %s", secret_name, resp.text)
-        resp.raise_for_status()
+        log.error(f"更新{secret_name}失败:{res.stderr}")
+        raise Exception(res.stderr)
 
 
 # ----------------------------------------------------------------------
@@ -220,10 +188,9 @@ def main():
     PASSWORD = os.getenv("NETEASE_PASSWORD")
     MD5_PASSWORD = os.getenv("NETEASE_MD5_PASSWORD")
     GH_TOKEN = os.getenv("GH_TOKEN")
-    GH_REPO = os.getenv("GH_REPO")
 
-    if not GH_TOKEN or not GH_REPO:
-        log.error("必须提供 GH_TOKEN 和 GH_REPO 环境变量")
+    if not GH_TOKEN:
+        log.error("必须提供 GH_TOKEN 环境变量")
         sys.exit(1)
 
     session = NeteaseSession()
@@ -265,12 +232,13 @@ def main():
 
     log.info("成功获取新 Cookie")
 
-    # 4. 更新 GitHub Secrets
+    # 4. 更新 Secrets
+    os.environ["GH_TOKEN"] = GH_TOKEN
     try:
-        update_secret(GH_REPO, "MUSIC_U", new_music_u, GH_TOKEN)
-        update_secret(GH_REPO, "CSRF", new_csrf, GH_TOKEN)
+        update_secret_gh("MUSIC_U", new_music_u)
+        update_secret_gh("CSRF", new_csrf)
     except Exception as exc:
-        log.exception("GitHub Secret 更新失败")
+        log.exception("Secret 更新失败")
         send_email("Cookie 更新失败", f"Secret 更新错误：{exc}")
         sys.exit(1)
 
