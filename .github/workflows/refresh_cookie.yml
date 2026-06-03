@@ -24,11 +24,6 @@ jobs:
         python -m pip install --upgrade pip
         pip install requests pycryptodome -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-    - name: Auth gh cli
-      env:
-        GH_TOKEN: ${{ secrets.GH_TOKEN }}
-      run: gh auth login --with-token <<< $GH_TOKEN
-
     - name: Run refresh script
       env:
         MUSIC_U: ${{ secrets.MUSIC_U }}
