@@ -4,6 +4,7 @@ import requests
 import subprocess
 import random
 import base64
+import hashlib
 from Crypto.Cipher import AES
 
 # 读取环境变量
@@ -39,7 +40,8 @@ def get_params(data):
 def refresh_cookie():
     cookies = {"MUSIC_U": MUSIC_U, "__csrf": CSRF}
     session.cookies.update(cookies)
-    res = session.get("https://music.163.com/api/v1/user/account", headers=headers, timeout=15)
+    # 换可用的用户信息接口
+    res = session.get("https://music.163.com/api/nuser/account/get", headers=headers, timeout=15)
     print("用户信息接口返回文本：", res.text[:300])
     try:
         data = res.json()
@@ -51,13 +53,14 @@ def refresh_cookie():
     print("❌ Cookie失效，开始手机号登录")
     return False, "", ""
 
-# 手机号登录（增加返回内容打印，避免直接json报错）
+# 手机号登录
 def login_by_phone(phone, pwd):
     url = "https://music.163.com/weapi/login/cellphone"
-    raw_data = {"phone": phone, "password": hashlib.md5(pwd.encode()).hexdigest(), "rememberLogin": "true"}
+    # 密码md5
+    pwd_md5 = hashlib.md5(pwd.encode()).hexdigest()
+    raw_data = {"phone": phone, "password": pwd_md5, "rememberLogin": "true"}
     post_data = get_params(raw_data)
     resp = session.post(url, data=post_data, headers=headers, timeout=15)
-    # 关键：先打印返回内容，再解析json
     print("登录接口原始返回：", resp.text[:500])
     try:
         login_res = resp.json()
