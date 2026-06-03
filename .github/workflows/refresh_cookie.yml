@@ -25,11 +25,9 @@ log = logging.getLogger("cookie-refresh")
 # ----------------------------------------------------------------------
 # 网易云加密常量
 # ----------------------------------------------------------------------
-# 固定 AES 密钥
 AES_FIXED_KEY = b"0CoJUm6Qyw8W8jud"
 AES_IV = b"0102030405060708"
 
-# 网易云 weapi RSA 公钥
 RSA_PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDgzBYYoEzRtoHqOZ3Gn6QFnOFh
 KuTqJLqBpA/U9LmBzHwUZ+qLJzT+RzKzTcmxsw/xr+wYcll9NHDfHkB9KZqD4QH6
@@ -60,12 +58,9 @@ def weapi_encrypt(data: dict) -> dict:
     返回 {'params': str, 'encSecKey': str}
     """
     text = json.dumps(data)
-    # 第一层 AES（固定密钥）
     first_enc = aes_encrypt(text, AES_FIXED_KEY)
-    # 第二层 AES（随机密钥）
     second_key = os.urandom(16)
     params = aes_encrypt(first_enc, second_key)
-    # encSecKey 需要将随机密钥反转后 RSA 加密
     enc_sec_key = rsa_encrypt(second_key[::-1])
     return {"params": params, "encSecKey": enc_sec_key}
 
@@ -74,7 +69,6 @@ def weapi_encrypt(data: dict) -> dict:
 # 网易云 API 请求辅助
 # ----------------------------------------------------------------------
 class NeteaseSession(requests.Session):
-    """预置基础 headers 的 Session"""
     def __init__(self):
         super().__init__()
         self.headers.update({
@@ -87,7 +81,6 @@ class NeteaseSession(requests.Session):
         })
 
     def weapi_post(self, url: str, data: dict) -> dict:
-        """发送 weapi 加密请求，返回响应的 JSON"""
         enc = weapi_encrypt(data)
         resp = self.post(
             url,
@@ -103,10 +96,6 @@ class NeteaseSession(requests.Session):
 # ----------------------------------------------------------------------
 def login_cellphone(session: NeteaseSession, phone: str,
                     password: str = None, md5_password: str = None) -> dict:
-    """
-    手机号 + 密码登录，返回 cookie 字典
-    若提供 md5_password 则直接使用，否则对 password 做 md5
-    """
     if md5_password:
         passwd = md5_password
     else:
@@ -119,7 +108,6 @@ def login_cellphone(session: NeteaseSession, phone: str,
         "rememberLogin": "true",
     }
     log.info("正在使用手机号登录...")
-    # 先访问首页获取一个基础 cookie (__csrf 等)
     session.get("https://music.163.com/", timeout=15)
     resp_json = session.weapi_post("https://music.163.com/weapi/login/cellphone", data)
     log.info("登录响应: %s", resp_json)
@@ -127,18 +115,13 @@ def login_cellphone(session: NeteaseSession, phone: str,
     if resp_json.get("code") != 200:
         raise RuntimeError(f"手机登录失败: {resp_json}")
 
-    cookies = session.cookies.get_dict()
-    return cookies
+    return session.cookies.get_dict()
 
 
 def refresh_token(session: NeteaseSession, music_u: str, csrf: str) -> dict:
-    """
-    使用旧的 MUSIC_U 和 __csrf 刷新 Token，返回新 cookie 字典
-    """
-    # 先种入旧 cookie
     session.cookies.set("MUSIC_U", music_u, domain="music.163.com")
     session.cookies.set("__csrf", csrf, domain="music.163.com")
-    session.get("https://music.163.com/", timeout=15)  # 保持会话
+    session.get("https://music.163.com/", timeout=15)
 
     data = {
         "token": music_u,
@@ -160,7 +143,6 @@ def refresh_token(session: NeteaseSession, music_u: str, csrf: str) -> dict:
 # GitHub Secrets 更新
 # ----------------------------------------------------------------------
 def get_public_key(repo: str, gh_token: str):
-    """获取仓库的 public key"""
     url = f"https://api.github.com/repos/{repo}/actions/secrets/public-key"
     headers = {
         "Authorization": f"token {gh_token}",
@@ -173,7 +155,6 @@ def get_public_key(repo: str, gh_token: str):
 
 
 def encrypt_secret(public_key: str, value: str) -> str:
-    """用 libsodium 加密 secret 值"""
     pk = nacl.public.PublicKey(
         public_key.encode("utf-8"), nacl.encoding.Base64Encoder()
     )
@@ -183,7 +164,6 @@ def encrypt_secret(public_key: str, value: str) -> str:
 
 
 def update_secret(repo: str, secret_name: str, secret_value: str, gh_token: str):
-    """更新或创建 GitHub Actions secret"""
     key_id, public_key = get_public_key(repo, gh_token)
     encrypted = encrypt_secret(public_key, secret_value)
 
@@ -208,7 +188,6 @@ def update_secret(repo: str, secret_name: str, secret_value: str, gh_token: str)
 # 邮件通知（可选）
 # ----------------------------------------------------------------------
 def send_email(subject: str, content: str):
-    """如果环境变量中包含邮件配置，则发送通知"""
     smtp_server = os.getenv("SMTP_SERVER")
     smtp_port = os.getenv("SMTP_PORT")
     sender = os.getenv("NOTIFY_EMAIL")
@@ -220,7 +199,7 @@ def send_email(subject: str, content: str):
     msg = MIMEText(content, "plain", "utf-8")
     msg["Subject"] = subject
     msg["From"] = sender
-    msg["To"] = sender  # 自收自发
+    msg["To"] = sender
 
     try:
         with smtplib.SMTP_SSL(smtp_server, int(smtp_port)) as server:
@@ -235,7 +214,6 @@ def send_email(subject: str, content: str):
 # 主流程
 # ----------------------------------------------------------------------
 def main():
-    # 读取环境变量
     MUSIC_U = os.getenv("MUSIC_U")
     CSRF = os.getenv("CSRF")
     PHONE = os.getenv("NETEASE_PHONE")
@@ -258,7 +236,6 @@ def main():
             new_cookies = refresh_token(session, MUSIC_U, CSRF)
         except Exception as exc:
             log.warning("Token 刷新失败: %s，准备回退到密码登录", exc)
-            # 刷新失败，清掉可能被污染的 cookie
             session.cookies.clear()
 
     # 2. 如果刷新未获得有效 cookie，使用手机号密码登录
