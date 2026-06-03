@@ -2,7 +2,7 @@ name: Refresh Cookie
 
 on:
   schedule:
-    - cron: '0 14 * * 0'  # UTC14点=北京时间每周日22:00
+    - cron: '0 14 * * 0'  # UTC14=北京时间22点周日
   workflow_dispatch:
 
 jobs:
@@ -23,8 +23,10 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install requests pycryptodome PyNaCl -i https://pypi.tuna.tsinghua.edu.cn/simple
-        # 使用gitee国内镜像源安装pyncm，解决github克隆失败
-        pip install git+https://gitee.com/mirrors_pyncm/pyncm.git -i https://pypi.tuna.tsinghua.edu.cn/simple
+        # 先手动git拉源码，再本地安装，避开pip内置git克隆报错
+        git clone https://gitee.com/mirrors_pyncm/pyncm.git
+        cd pyncm
+        pip install . -i https://pypi.tuna.tsinghua.edu.cn/simple
     
     - name: Run refresh script
       env:
