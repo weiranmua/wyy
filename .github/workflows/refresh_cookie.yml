@@ -24,13 +24,18 @@ jobs:
         python -m pip install --upgrade pip
         pip install requests pycryptodome -i https://pypi.tuna.tsinghua.edu.cn/simple
 
+    # 配置国内代理环境变量，绕过网易云IP封禁
+    - name: Set proxy env
+      run: |
+        echo "HTTP_PROXY=http://154.12.54.78:80" >> $GITHUB_ENV
+        echo "HTTPS_PROXY=http://154.12.54.78:80" >> $GITHUB_ENV
+
     - name: Run refresh script
       env:
         MUSIC_U: ${{ secrets.MUSIC_U }}
         CSRF: ${{ secrets.CSRF }}
         NETEASE_PHONE: ${{ secrets.NETEASE_PHONE }}
         NETEASE_PASSWORD: ${{ secrets.NETEASE_PASSWORD }}
-        NETEASE_MD5_PASSWORD: ${{ secrets.NETEASE_MD5_PASSWORD }}
         GH_TOKEN: ${{ secrets.GH_TOKEN }}
         NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
         EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
