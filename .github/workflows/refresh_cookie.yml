@@ -2,7 +2,7 @@ name: Refresh Cookie
 
 on:
   schedule:
-    - cron: '0 14 * * 0'  # 每周日 22:00 北京时间
+    - cron: '0 14 * * 0'  # UTC14点=北京时间每周日22:00
   workflow_dispatch:
 
 jobs:
@@ -17,11 +17,11 @@ jobs:
       with:
         python-version: '3.11'
     
-    # 关键：只装必需依赖，不装 pyncm
+    # ==========这里添加pyncm，重点修改处==========
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install requests pycryptodome PyNaCl -i https://pypi.tuna.tsinghua.edu.cn/simple
+        pip install requests pycryptodome PyNaCl pyncm -i https://pypi.tuna.tsinghua.edu.cn/simple
     
     - name: Run refresh script
       env:
