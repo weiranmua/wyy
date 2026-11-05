@@ -29,18 +29,34 @@ def set_cookie_cross_domain(session: requests.Session, name: str, value: str):
 
 def wait_and_refresh_by_qr(config: Config, logger: Logger, notifier: NotificationService, session: requests.Session) -> bool:
     """
-    通过官方原生接口生成二维码、使用固定 Session 轮询并提取持久化 Cookie
+    通过官方原生接口生成二维码、使用固定 Session 保持会话并提取持久化 Cookie
     """
     try:
-        logger.info("正在请求网易云登录二维码...")
+        logger.info("正在初始化网络环境并请求网易云登录二维码...")
         
-        # 1. 关键修复：创建专用的 qr_session，在全生命周期维持握手 Cookie
+        # 1. 建立具有设备标识的会话
         qr_session = requests.Session()
         qr_session.headers.update(HEADERS)
+        # 写入基础指纹，防止异地 Actions 机房直接被风控阻断
+        qr_session.cookies.set("os", "pc", domain=".music.163.com")
+        qr_session.cookies.set("appver", "8.9.70", domain=".music.163.com")
+
+        # 访问主页预热获取基础 token
+        try:
+            qr_session.get("https://music.163.com/", timeout=5)
+        except Exception:
+            pass
 
         t = int(time.time() * 1000)
-        key_url = f"https://music.163.com/api/login/qrcode/unikey?type=1&_nmclfl=1&t={t}"
-        key_res = qr_session.post(key_url, timeout=10).json()
+        key_url = "https://music.163.com/api/login/qrcode/unikey"
+        
+        # 必须携带 POST 表单参数获取 unikey
+        key_res = qr_session.post(
+            key_url,
+            data={"type": "1", "_nmclfl": "1", "t": t},
+            params={"type": "1", "_nmclfl": "1", "t": t},
+            timeout=10
+        ).json()
         unikey = key_res.get("unikey")
         
         if not unikey:
@@ -66,7 +82,7 @@ def wait_and_refresh_by_qr(config: Config, logger: Logger, notifier: Notificatio
                 f"检测到 Cookie 已失效，请在手机上打开链接或长按扫码登录：\n"
                 f"二维码图片: {qr_img_url}\n"
                 f"授权链接: {login_url}\n"
-                f"有效期 3 分钟，确认后系统将自动保存并继续打卡。"
+                f"请在 3 分钟内完成确认。"
             )
         except Exception as e:
             logger.warning(f"发送扫码通知失败: {e}")
@@ -74,11 +90,25 @@ def wait_and_refresh_by_qr(config: Config, logger: Logger, notifier: Notificatio
         # 4. 轮询二维码状态（最长等待 180 秒）
         start_time = time.time()
         last_logged_code = None
+        check_url = "https://music.163.com/api/login/qrcode/client/login"
 
         while time.time() - start_time < 180:
-            check_url = f"https://music.163.com/api/login/qrcode/client/login?type=1&key={unikey}&_nmclfl=1&t={int(time.time() * 1000)}"
-            # 关键修复：必须用 qr_session.post 发送请求
-            check_res = qr_session.post(check_url, timeout=10)
+            now_t = int(time.time() * 1000)
+            
+            # 关键修复：URL 与 Form Data 双重传递 key，保证后台状态正常流转
+            post_data = {
+                "key": unikey,
+                "type": "1",
+                "_nmclfl": "1"
+            }
+            query_params = {
+                "key": unikey,
+                "type": "1",
+                "_nmclfl": "1",
+                "t": now_t
+            }
+            
+            check_res = qr_session.post(check_url, params=query_params, data=post_data, timeout=10)
             
             try:
                 data = check_res.json()
@@ -88,7 +118,7 @@ def wait_and_refresh_by_qr(config: Config, logger: Logger, notifier: Notificatio
 
             code = data.get("code")
 
-            # 避免日志刷屏，仅在状态码变更时打印
+            # 避免日志刷屏
             if code != last_logged_code:
                 last_logged_code = code
                 if code == 801:
@@ -102,7 +132,7 @@ def wait_and_refresh_by_qr(config: Config, logger: Logger, notifier: Notificatio
             elif code == 803:
                 logger.info("🎉 手机端已确认授权！正在提取并保存最新 Cookie...")
                 
-                # 优先从 qr_session 与 check_res 的 cookies 容器中获取
+                # 优先从 qr_session 和响应头 cookies 中拿
                 music_u = qr_session.cookies.get("MUSIC_U") or check_res.cookies.get("MUSIC_U") or ""
                 csrf = qr_session.cookies.get("__csrf") or check_res.cookies.get("__csrf") or ""
 
