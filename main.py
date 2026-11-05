@@ -12,29 +12,35 @@ from src.validators.cookie import CookieValidator
 
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    ),
     "Referer": "https://music.163.com/",
     "Accept": "application/json, text/plain, */*"
 }
 
 
 def set_cookie_cross_domain(session: requests.Session, name: str, value: str):
-    """确保 Cookie 跨二级子域名生效"""
+    """确保 Cookie 能够跨网易云各子域名共享生效"""
     session.cookies.set(name, value, domain=".music.163.com", path="/")
     session.cookies.set(name, value)
 
 
 def wait_and_refresh_by_qr(config: Config, logger: Logger, notifier: NotificationService, session: requests.Session) -> bool:
     """
-    通过官方原生接口生成二维码、轮询状态并提取保存 Cookie（无需 pyncm 库）
+    通过官方原生接口生成二维码、使用固定 Session 轮询并提取持久化 Cookie
     """
     try:
         logger.info("正在请求网易云登录二维码...")
-        t = int(time.time() * 1000)
         
-        # 1. 请求 unikey
+        # 1. 关键修复：创建专用的 qr_session，在全生命周期维持握手 Cookie
+        qr_session = requests.Session()
+        qr_session.headers.update(HEADERS)
+
+        t = int(time.time() * 1000)
         key_url = f"https://music.163.com/api/login/qrcode/unikey?type=1&_nmclfl=1&t={t}"
-        key_res = requests.post(key_url, headers=HEADERS, timeout=10).json()
+        key_res = qr_session.post(key_url, timeout=10).json()
         unikey = key_res.get("unikey")
         
         if not unikey:
@@ -67,29 +73,43 @@ def wait_and_refresh_by_qr(config: Config, logger: Logger, notifier: Notificatio
 
         # 4. 轮询二维码状态（最长等待 180 秒）
         start_time = time.time()
+        last_logged_code = None
+
         while time.time() - start_time < 180:
             check_url = f"https://music.163.com/api/login/qrcode/client/login?type=1&key={unikey}&_nmclfl=1&t={int(time.time() * 1000)}"
-            check_res = requests.post(check_url, headers=HEADERS, timeout=10)
-            data = check_res.json()
+            # 关键修复：必须用 qr_session.post 发送请求
+            check_res = qr_session.post(check_url, timeout=10)
+            
+            try:
+                data = check_res.json()
+            except Exception:
+                time.sleep(2)
+                continue
+
             code = data.get("code")
 
-            if code == 800:
-                logger.error("二维码已失效过期。")
-                return False
-            elif code == 801:
-                pass  # 等待扫码
-            elif code == 802:
-                logger.info("已扫码，请在手机端点击【确认登录】...")
-            elif code == 803:
-                logger.info("🎉 授权成功！正在提取并保存最新 Cookie...")
-                
-                # 优先从 check_res 的 cookies 中提取
-                music_u = check_res.cookies.get("MUSIC_U") or ""
-                csrf = check_res.cookies.get("__csrf") or ""
+            # 避免日志刷屏，仅在状态码变更时打印
+            if code != last_logged_code:
+                last_logged_code = code
+                if code == 801:
+                    logger.info("⏳ 等待手机端扫码...")
+                elif code == 802:
+                    logger.info("📱 已扫码成功！请在手机端点击【确认登录】...")
 
-                # 备用方案：从返回体里的 cookie 文本或 session 中提取
-                if not music_u and "cookie" in data:
-                    for item in data["cookie"].split(";"):
+            if code == 800:
+                logger.error("❌ 二维码已失效过期。")
+                return False
+            elif code == 803:
+                logger.info("🎉 手机端已确认授权！正在提取并保存最新 Cookie...")
+                
+                # 优先从 qr_session 与 check_res 的 cookies 容器中获取
+                music_u = qr_session.cookies.get("MUSIC_U") or check_res.cookies.get("MUSIC_U") or ""
+                csrf = qr_session.cookies.get("__csrf") or check_res.cookies.get("__csrf") or ""
+
+                # 备用方案：解析返回体里的 raw cookie 字符串
+                raw_cookie_str = data.get("cookie", "")
+                if not music_u and raw_cookie_str:
+                    for item in raw_cookie_str.split(";"):
                         item = item.strip()
                         if item.startswith("MUSIC_U="):
                             music_u = item.split("=", 1)[1]
@@ -97,17 +117,17 @@ def wait_and_refresh_by_qr(config: Config, logger: Logger, notifier: Notificatio
                             csrf = item.split("=", 1)[1]
 
                 if not music_u:
-                    logger.error("未能从返回数据中获取到 MUSIC_U，登录失败！")
+                    logger.error(f"授权成功但未能捕获 MUSIC_U，返回数据: {data}")
                     return False
 
                 if not csrf:
                     csrf = uuid.uuid4().hex
 
-                # 将新 Cookie 注入当前执行会话
+                # 将新 Cookie 注入主程序执行 session
                 set_cookie_cross_domain(session, "MUSIC_U", music_u)
                 set_cookie_cross_domain(session, "__csrf", csrf)
 
-                # 写回配置并自动触发 GitHub Secrets 保存
+                # 写回配置并触发 GitHub Secrets 持久化更新
                 config.set("Cookie_MUSIC_U", music_u)
                 config.set("Cookie___csrf", csrf)
 
