@@ -1,5 +1,5 @@
 requests>=2.28.0
-pyncm
+git+https://github.com/greats3an/pyncm.git
 qrcode>=7.4.2
 pillow>=9.5.0
 pynacl>=1.5.0
