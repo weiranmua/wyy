@@ -1,15 +1,9 @@
+import base64
 import json
 import os
 import random
-import base64
 from typing import Any, Dict, Optional
 import requests
-
-try:
-    from nacl import encoding, public
-    HAS_PYNACL = True
-except ImportError:
-    HAS_PYNACL = False
 
 
 class Config:
@@ -59,7 +53,7 @@ class Config:
         if md5_password := os.getenv("NETEASE_MD5_PASSWORD"):
             config["netease_md5_password"] = md5_password
 
-        # GitHub 相关配置 (用于自动更新 Secrets)
+        # GitHub Secrets 自动更新配置
         if gh_token := os.getenv("GH_TOKEN"):
             config["gh_token"] = gh_token
         if gh_repo := os.getenv("GH_REPO"):
@@ -94,7 +88,7 @@ class Config:
 
         config.setdefault("wait_time_min", 15)
         config.setdefault("wait_time_max", 20)
-        config.setdefault("smtp_server", "smtp.gmail.com")
+        config.setdefault("smtp_server", "smtp.qq.com")
         config.setdefault("smtp_port", 465)
         config.setdefault("score", 3)
         config.setdefault("full_extra_tasks", False)
@@ -104,87 +98,97 @@ class Config:
         return self.config_data.get(key, default)
 
     def set(self, key: str, value: Any) -> None:
-        """修改或新增配置项"""
+        """修改或设置配置项"""
         self.config_data[key] = value
 
     def save(self) -> bool:
-        """
-        持久化保存配置：
-        1. 本地模式：写回 config/setting.json
-        2. GitHub Actions 模式：调用 GitHub API 更新 Secrets
-        """
+        """持久化保存 Cookie"""
         if self.is_env_mode:
             return self._save_to_github_secrets()
         return self._save_to_file()
 
     def _save_to_file(self) -> bool:
-        """本地文件回写保存"""
+        """本地开发模式：写回 setting.json"""
         try:
             config_path = "config/setting.json"
             os.makedirs(os.path.dirname(config_path), exist_ok=True)
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(self.config_data, f, ensure_ascii=False, indent=4)
-            print("[Config] 本地 setting.json 自动更新成功")
+            print("[Config] 本地 setting.json 已自动更新")
             return True
         except Exception as e:
             print(f"[Config] 写入本地配置文件失败: {e}")
             return False
 
     def _save_to_github_secrets(self) -> bool:
-        """更新 GitHub 仓库 Secrets (MUSIC_U, CSRF)"""
+        """
+        Actions 云端模式：独立加密更新 Secrets
+        使用局部作用域导入，完全杜绝模块和命名冲突
+        """
         gh_token = self.get("gh_token")
         gh_repo = self.get("gh_repo")
 
         if not gh_token or not gh_repo:
-            print("[Config] 未配置 GH_TOKEN 或 GH_REPO，无法自动同步更新 GitHub Secrets")
-            return False
-
-        if not HAS_PYNACL:
-            print("[Config] 缺少 PyNaCl 依赖，无法加密更新 GitHub Secrets (请 pip install pynacl)")
+            print("[Config] 未获取到 GH_TOKEN 或 GH_REPO，跳过更新 GitHub Secrets")
             return False
 
         try:
-            headers = {
-                "Authorization": f"Bearer {gh_token}",
+            # 局部导入并设置别名，不影响任何其他模块
+            from nacl import encoding as _nacl_enc
+            from nacl import public as _nacl_pub
+        except ImportError:
+            print("[Config] 运行环境中缺少 pynacl 库，无法加密更新 Secrets")
+            return False
+
+        try:
+            req_headers = {
+                "Authorization": f"token {gh_token}",
                 "Accept": "application/vnd.github.v3+json"
             }
-            # 1. 获取公钥用于加密 Secret
-            key_url = f"https://api.github.com/repos/{gh_repo}/actions/secrets/public-key"
-            res = requests.get(key_url, headers=headers, timeout=10)
+
+            # 1. 独立获取当前仓库用于加密 Secret 的公钥
+            pub_key_api = f"https://api.github.com/repos/{gh_repo}/actions/secrets/public-key"
+            res = requests.get(pub_key_api, headers=req_headers, timeout=10)
             if res.status_code != 200:
-                print(f"[Config] 获取 GitHub Public Key 失败: {res.text}")
+                print(f"[Config] 获取仓库公钥失败: {res.status_code} - {res.text}")
                 return False
 
-            key_data = res.json()
-            public_key = public.PublicKey(key_data["key"].encode("utf-8"), encoding.Base64Encoder())
-            sealed_box = public.SealedBox(public_key)
+            key_info = res.json()
+            box_key = _nacl_pub.PublicKey(key_info["key"].encode("utf-8"), _nacl_enc.Base64Encoder())
+            sealed_box = _nacl_pub.SealedBox(box_key)
 
-            # 2. 定义待更新的 Secrets
-            updates = {
+            # 2. 需要回写的 Secrets 字典
+            secret_items = {
                 "MUSIC_U": self.get("Cookie_MUSIC_U", ""),
                 "CSRF": self.get("Cookie___csrf", "")
             }
 
-            for secret_name, secret_val in updates.items():
-                if not secret_val:
+            all_ok = True
+            for sec_name, sec_val in secret_items.items():
+                if not sec_val:
                     continue
-                encrypted = sealed_box.encrypt(secret_val.encode("utf-8"))
-                encrypted_str = base64.b64encode(encrypted).decode("utf-8")
 
-                put_url = f"https://api.github.com/repos/{gh_repo}/actions/secrets/{secret_name}"
+                # 使用 libsodium 规范对 Secret 加密
+                encrypted_bytes = sealed_box.encrypt(sec_val.encode("utf-8"))
+                encrypted_str = base64.b64encode(encrypted_bytes).decode("utf-8")
+
+                put_api = f"https://api.github.com/repos/{gh_repo}/actions/secrets/{sec_name}"
                 payload = {
                     "encrypted_value": encrypted_str,
-                    "key_id": key_data["key_id"]
+                    "key_id": key_info["key_id"]
                 }
-                r = requests.put(put_url, headers=headers, json=payload, timeout=10)
-                if r.status_code in (201, 204):
-                    print(f"[Config] GitHub Secret [{secret_name}] 同步更新成功！")
-                else:
-                    print(f"[Config] 更新 Secret [{secret_name}] 失败: {r.text}")
 
-            return True
+                put_res = requests.put(put_api, headers=req_headers, json=payload, timeout=10)
+                if put_res.status_code in (201, 204):
+                    print(f"[Config] ✅ 成功独立更新 Secret: {sec_name}")
+                else:
+                    print(f"[Config] ❌ 更新 Secret {sec_name} 失败: {put_res.text}")
+                    all_ok = False
+
+            return all_ok
+
         except Exception as e:
-            print(f"[Config] 同步更新 GitHub Secrets 出现异常: {e}")
+            print(f"[Config] ❌ 独立更新 GitHub Secrets 出现异常: {e}")
             return False
 
     def get_wait_time(self) -> float:
