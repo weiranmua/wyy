@@ -3,8 +3,6 @@ import time
 import uuid
 import requests
 import qrcode
-from pyncm import GetCurrentSession
-from pyncm.apis.login import LoginQRSessionKey, LoginQRCheck
 
 from src.core.bot import MusicPartnerBot
 from src.utils.config import Config
@@ -13,29 +11,40 @@ from src.utils.notification import NotificationService
 from src.validators.cookie import CookieValidator
 
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Referer": "https://music.163.com/",
+    "Accept": "application/json, text/plain, */*"
+}
+
+
 def set_cookie_cross_domain(session: requests.Session, name: str, value: str):
-    """确保 Cookie 能够跨网易云各子域名共享"""
+    """确保 Cookie 跨二级子域名生效"""
     session.cookies.set(name, value, domain=".music.163.com", path="/")
-    session.cookies.set(name, value)  # 兼顾根域名请求
+    session.cookies.set(name, value)
 
 
 def wait_and_refresh_by_qr(config: Config, logger: Logger, notifier: NotificationService, session: requests.Session) -> bool:
     """
-    通过二维码扫码重新获取 Cookie 并更新配置
+    通过官方原生接口生成二维码、轮询状态并提取保存 Cookie（无需 pyncm 库）
     """
     try:
-        logger.info("正在获取网易云登录二维码...")
-        qr_key_res = LoginQRSessionKey()
-        unikey = qr_key_res.get("unikey")
+        logger.info("正在请求网易云登录二维码...")
+        t = int(time.time() * 1000)
+        
+        # 1. 请求 unikey
+        key_url = f"https://music.163.com/api/login/qrcode/unikey?type=1&_nmclfl=1&t={t}"
+        key_res = requests.post(key_url, headers=HEADERS, timeout=10).json()
+        unikey = key_res.get("unikey")
+        
         if not unikey:
-            logger.error(f"获取 unikey 失败: {qr_key_res}")
+            logger.error(f"获取二维码 key 失败: {key_res}")
             return False
 
         login_url = f"https://music.163.com/login?codekey={unikey}"
-        # 生成可供直接扫码识别的二维码图片直链
         qr_img_url = f"https://api.qrserver.com/v1/create-qr-code/?data={login_url}&size=300x300"
 
-        # 1. 终端打印二维码（本地运行可直接扫）
+        # 2. 终端打印 ASCII 码
         print("\n" + "=" * 40)
         print("请使用网易云音乐 APP 扫描下方二维码登录：")
         qr = qrcode.QRCode(border=1)
@@ -44,43 +53,43 @@ def wait_and_refresh_by_qr(config: Config, logger: Logger, notifier: Notificatio
         print(f"二维码链接备用: {login_url}")
         print("=" * 40 + "\n")
 
-        # 2. 推送通知（在 Actions/服务器等无界面环境运行时接收）
+        # 3. 邮件/推送通知
         try:
             notifier.send_notification(
                 "网易云音乐合伙人 - 请扫码更新Cookie",
-                f"检测到 Cookie 已失效，请扫码登录刷新：\n"
-                f"二维码图片链接: {qr_img_url}\n"
-                f"扫码授权地址: {login_url}\n"
-                f"请在 3 分钟内完成确认。"
+                f"检测到 Cookie 已失效，请在手机上打开链接或长按扫码登录：\n"
+                f"二维码图片: {qr_img_url}\n"
+                f"授权链接: {login_url}\n"
+                f"有效期 3 分钟，确认后系统将自动保存并继续打卡。"
             )
         except Exception as e:
             logger.warning(f"发送扫码通知失败: {e}")
 
-        # 3. 轮询等待扫码状态（最长等待 180 秒）
+        # 4. 轮询二维码状态（最长等待 180 秒）
         start_time = time.time()
         while time.time() - start_time < 180:
-            check_res = LoginQRCheck(unikey)
-            code = check_res.get("code")
+            check_url = f"https://music.163.com/api/login/qrcode/client/login?type=1&key={unikey}&_nmclfl=1&t={int(time.time() * 1000)}"
+            check_res = requests.post(check_url, headers=HEADERS, timeout=10)
+            data = check_res.json()
+            code = data.get("code")
 
             if code == 800:
-                logger.error("二维码已过期，本次更新终止。")
+                logger.error("二维码已失效过期。")
                 return False
             elif code == 801:
-                pass  # 等待扫码中
+                pass  # 等待扫码
             elif code == 802:
                 logger.info("已扫码，请在手机端点击【确认登录】...")
             elif code == 803:
                 logger.info("🎉 授权成功！正在提取并保存最新 Cookie...")
                 
-                pyncm_session = GetCurrentSession()
-                cookies_dict = pyncm_session.cookies.get_dict()
-                
-                music_u = cookies_dict.get("MUSIC_U", "")
-                csrf = cookies_dict.get("__csrf", "")
+                # 优先从 check_res 的 cookies 中提取
+                music_u = check_res.cookies.get("MUSIC_U") or ""
+                csrf = check_res.cookies.get("__csrf") or ""
 
-                # 备用提取机制：解析返回中的 Set-Cookie 字符串
-                if not music_u and "cookie" in check_res:
-                    for item in check_res["cookie"].split(";"):
+                # 备用方案：从返回体里的 cookie 文本或 session 中提取
+                if not music_u and "cookie" in data:
+                    for item in data["cookie"].split(";"):
                         item = item.strip()
                         if item.startswith("MUSIC_U="):
                             music_u = item.split("=", 1)[1]
@@ -88,18 +97,17 @@ def wait_and_refresh_by_qr(config: Config, logger: Logger, notifier: Notificatio
                             csrf = item.split("=", 1)[1]
 
                 if not music_u:
-                    logger.error("未能成功提取到 MUSIC_U，登录失败！")
+                    logger.error("未能从返回数据中获取到 MUSIC_U，登录失败！")
                     return False
 
-                # 若未捕获到 __csrf，自动生成 32 位十六进制作为合法 csrf 兜底
                 if not csrf:
                     csrf = uuid.uuid4().hex
 
-                # 跨子域写入当前执行 session
+                # 将新 Cookie 注入当前执行会话
                 set_cookie_cross_domain(session, "MUSIC_U", music_u)
                 set_cookie_cross_domain(session, "__csrf", csrf)
 
-                # 将新的 Cookie 写回 config 实例并持久化
+                # 写回配置并自动触发 GitHub Secrets 保存
                 config.set("Cookie_MUSIC_U", music_u)
                 config.set("Cookie___csrf", csrf)
 
@@ -108,12 +116,12 @@ def wait_and_refresh_by_qr(config: Config, logger: Logger, notifier: Notificatio
                 elif hasattr(config, "save_config"):
                     config.save_config()
 
-                logger.info("✅ Cookie 自动刷新并持久化成功！")
+                logger.info("✅ Cookie 自动刷新并持久化保存成功！")
                 return True
 
             time.sleep(2)
 
-        logger.error("扫码等待超时（3分钟未确认）。")
+        logger.error("扫码等待超时（3分钟未扫码确认）。")
         return False
 
     except Exception as e:
@@ -128,7 +136,7 @@ def main():
         logger = Logger()
         notifier = NotificationService(config, logger)
         
-        # 创建会话并写入 Cookie
+        # 创建会话并注入配置中的 Cookie
         session = requests.Session()
         initial_music_u = config.get("Cookie_MUSIC_U") or ""
         initial_csrf = config.get("Cookie___csrf") or ""
@@ -138,11 +146,11 @@ def main():
         if initial_csrf:
             set_cookie_cross_domain(session, "__csrf", initial_csrf)
         
-        # 验证 Cookie
+        # 验证 Cookie 是否有效
         validator = CookieValidator(session, logger)
         is_valid, message = validator.validate()
         
-        # 如果 Cookie 失效，自动启动扫码登录更新流程
+        # 失效自动拉起扫码登录
         if not is_valid:
             logger.warning(f"Cookie 校验未通过 ({message})，正在拉起自动扫码刷新...")
             success_login = wait_and_refresh_by_qr(config, logger, notifier, session)
@@ -155,5 +163,39 @@ def main():
                 )
                 return
             
-            # 重新验证刷新后的 Cookie
-            is_
+            # 二次校验
+            is_valid, message = validator.validate()
+            if not is_valid:
+                logger.error(f"刷新后 Cookie 校验依然未通过: {message}")
+                return
+        
+        # 运行主程序
+        bot = MusicPartnerBot(config, logger, session)
+        success = bot.run()
+        
+        # 处理执行结果
+        end_message = "✅ 执行成功" if success else "❌ 执行失败"
+        logger.end(end_message, not success)
+        
+        if not success:
+            notifier.send_notification(
+                "网易云音乐合伙人 - 执行失败提醒",
+                "程序执行失败，请检查日志"
+            )
+            
+    except Exception as e:
+        error_message = f"程序异常: {str(e)}"
+        logger.error(error_message)
+        logger.end("❌ 执行失败", True)
+        
+        try:
+            notifier.send_notification(
+                "网易云音乐合伙人 - 异常提醒",
+                error_message
+            )
+        except Exception as notify_error:
+            logger.error(f"发送异常通知时出错: {str(notify_error)}")
+
+
+if __name__ == "__main__":
+    main()
