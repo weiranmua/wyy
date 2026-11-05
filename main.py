@@ -22,9 +22,14 @@ HEADERS = {
 
 
 def set_cookie_cross_domain(session: requests.Session, name: str, value: str):
-    """确保 Cookie 能够跨网易云各子域名共享生效"""
+    """清理历史同名 Cookie 并规范写入统一作用域，彻底防止 multiple cookies 异常"""
+    try:
+        session.cookies.clear(domain=".music.163.com", path="/", name=name)
+        session.cookies.clear(domain="music.163.com", path="/", name=name)
+        session.cookies.clear(name=name)
+    except Exception:
+        pass
     session.cookies.set(name, value, domain=".music.163.com", path="/")
-    session.cookies.set(name, value)
 
 
 def wait_and_refresh_by_qr(config: Config, logger: Logger, notifier: NotificationService, session: requests.Session) -> bool:
@@ -37,11 +42,9 @@ def wait_and_refresh_by_qr(config: Config, logger: Logger, notifier: Notificatio
         # 1. 建立具有设备标识的会话
         qr_session = requests.Session()
         qr_session.headers.update(HEADERS)
-        # 写入基础指纹，防止异地 Actions 机房直接被风控阻断
         qr_session.cookies.set("os", "pc", domain=".music.163.com")
         qr_session.cookies.set("appver", "8.9.70", domain=".music.163.com")
 
-        # 访问主页预热获取基础 token
         try:
             qr_session.get("https://music.163.com/", timeout=5)
         except Exception:
@@ -50,7 +53,6 @@ def wait_and_refresh_by_qr(config: Config, logger: Logger, notifier: Notificatio
         t = int(time.time() * 1000)
         key_url = "https://music.163.com/api/login/qrcode/unikey"
         
-        # 必须携带 POST 表单参数获取 unikey
         key_res = qr_session.post(
             key_url,
             data={"type": "1", "_nmclfl": "1", "t": t},
@@ -94,8 +96,6 @@ def wait_and_refresh_by_qr(config: Config, logger: Logger, notifier: Notificatio
 
         while time.time() - start_time < 180:
             now_t = int(time.time() * 1000)
-            
-            # 关键修复：URL 与 Form Data 双重传递 key，保证后台状态正常流转
             post_data = {
                 "key": unikey,
                 "type": "1",
@@ -118,7 +118,6 @@ def wait_and_refresh_by_qr(config: Config, logger: Logger, notifier: Notificatio
 
             code = data.get("code")
 
-            # 避免日志刷屏
             if code != last_logged_code:
                 last_logged_code = code
                 if code == 801:
@@ -132,11 +131,9 @@ def wait_and_refresh_by_qr(config: Config, logger: Logger, notifier: Notificatio
             elif code == 803:
                 logger.info("🎉 手机端已确认授权！正在提取并保存最新 Cookie...")
                 
-                # 优先从 qr_session 和响应头 cookies 中拿
                 music_u = qr_session.cookies.get("MUSIC_U") or check_res.cookies.get("MUSIC_U") or ""
                 csrf = qr_session.cookies.get("__csrf") or check_res.cookies.get("__csrf") or ""
 
-                # 备用方案：解析返回体里的 raw cookie 字符串
                 raw_cookie_str = data.get("cookie", "")
                 if not music_u and raw_cookie_str:
                     for item in raw_cookie_str.split(";"):
@@ -153,7 +150,10 @@ def wait_and_refresh_by_qr(config: Config, logger: Logger, notifier: Notificatio
                 if not csrf:
                     csrf = uuid.uuid4().hex
 
-                # 将新 Cookie 注入主程序执行 session
+                # 关键修复：扫码成功后，彻底清除运行 session 历史冲突 Cookie
+                session.cookies.clear()
+
+                # 将新 Cookie 规范注入主程序执行 session
                 set_cookie_cross_domain(session, "MUSIC_U", music_u)
                 set_cookie_cross_domain(session, "__csrf", csrf)
 
